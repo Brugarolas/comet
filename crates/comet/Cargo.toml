@@ -8,20 +8,19 @@ edition = "2021"
 [dependencies]
 mopa = "0.2"
 libc = "0.2.98"
-ahash = "0.7"
-hashbrown = "0.11"
-atomic = "0.5"
+ahash = "0.8.12"
+hashbrown = "0.17.1"
+atomic = "0.6.1"
 threadfin = "0.1"
-parking_lot = "0.11"
+parking_lot = "0.12.5"
 scoped_threadpool = "0.1"
 crossbeam = "0.8"
-bit-vec = "0.6"
-rand = "0.8"
-flume = "0.10"
-rosalloc = { git = "https://github.com/playxe/rosalloc" }
-#rosalloc = { path = "rosalloc" }
+bit-vec = "0.10.1"
+rand = "0.10.3"
+flume = "0.12"
+rosalloc = { path = "../rosalloc" }
 im = "15.0"
-memx = "0.1"
+memx = "0.2.2"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = [
     "memoryapi",

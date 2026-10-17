@@ -1,5 +1,5 @@
 
 [workspace]
-members = ["crates/comet", "crates/comet-extra"]
+members = ["crates/rosalloc", "crates/comet", "crates/comet-extra"]
 
-default-members = ["crates/comet", "crates/comet-extra"]
+default-members = ["crates/rosalloc", "crates/comet", "crates/comet-extra"]
