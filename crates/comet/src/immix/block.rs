@@ -20,6 +20,7 @@ pub struct ImmixBlock {
     pub state: BlockState,
     hole_count: u32,
     fragmented: bool,
+    pinned_for_evacuation: bool,
 }
 
 impl ImmixBlock {
@@ -29,12 +30,19 @@ impl ImmixBlock {
     pub fn set_state(&mut self, state: BlockState) {
         self.state = state;
     }
+    pub fn set_pinned_for_evacuation(&mut self, pinned: bool) {
+        self.pinned_for_evacuation = pinned;
+    }
+    pub fn is_pinned_for_evacuation(&self) -> bool {
+        self.pinned_for_evacuation
+    }
     pub fn chunk(&self) -> *mut Chunk {
         Chunk::align(self.start()).cast()
     }
 
     pub fn deinit(&mut self) {
         self.state = BlockState::Unallocated;
+        self.pinned_for_evacuation = false;
     }
     pub fn init(&mut self, copy: bool) {
         self.state = if copy {
@@ -44,6 +52,7 @@ impl ImmixBlock {
         };
         self.hole_count = 0;
         self.fragmented = false;
+        self.pinned_for_evacuation = false;
         self.next = null_mut();
     }
     pub fn next_atomic(&self) -> &AtomicPtr<ImmixBlock> {
@@ -273,6 +282,7 @@ impl BlockList {
     #[inline]
     pub fn reset(&self) {
         self.head.store(null_mut(), Ordering::Relaxed);
+        self.count.store(0, Ordering::Relaxed);
     }
 
     /// Get an array of all reusable blocks stored in this BlockList.

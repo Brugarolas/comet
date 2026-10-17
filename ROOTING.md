@@ -38,6 +38,27 @@ It's ok to return raw pointers! These do not need to be rooted, but they should 
 
 # Performance Tweaking
 
+## Sticky Immix evacuation
+
+Sticky Immix can optionally evacuate sparsely occupied blocks to reduce
+fragmentation:
+
+```rust
+let options = comet::sticky_immix::StickyImmixOptions::default()
+    .with_evacuation(true);
+let mutator =
+    comet::sticky_immix::instantiate_sticky_immix::<comet::gc_base::NoOpStackDecoder>(
+        options,
+    );
+```
+
+Evacuation is disabled by default. When enabled, any conservative stack value
+observed inside an evacuation candidate pins its entire block for that
+collection. Traced `Gc` references are rewritten when their referents move, so
+heap fields must continue to implement `Trace` correctly. This does not make
+unrooted pointers in globals, native code, or untraced fields safe. Sticky
+Immix still traces the full heap; generational collection is not enabled.
+
 If the extra overhead of exact rooting does end up adding an unacceptable cost to a specific code path, there are some tricks you can use to get better performance at the cost of more complex code: 
 
 - Move `letroot!()` declarations above loops. Rust compiler backend sometimes is not smart enough to do LICM on `Rooted<T>`, so forward declaring a single `Rooted<T>` above the loop and re-using it on every iteration can save some cycles. 

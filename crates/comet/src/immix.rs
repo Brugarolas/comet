@@ -29,8 +29,8 @@ use crate::{
     utils::align_down,
 };
 use atomic::Ordering;
-use im::Vector;
 use rosalloc::defs::PAGE_SIZE;
+use std::collections::HashSet;
 use std::{
     any::TypeId, cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, sync::Arc,
 };
@@ -289,8 +289,11 @@ impl ImmixAllocator {
 }
 use parking_lot::{lock_api::RawMutex, RawMutex as Lock};
 
-/// Immix GC implementation. Read top level module documentation for more information
-pub struct Immix<Decoder: 'static + StackValueDecoder = NoOpStackDecoder> {
+/// Sticky Immix GC implementation.
+///
+/// Marking remains full-heap because this collector has no generational write barrier.
+/// Selective block evacuation is available as an opt-in fragmentation-reduction step.
+pub struct StickyImmix<Decoder: 'static + StackValueDecoder = NoOpStackDecoder> {
     space: &'static ImmixSpace,
     pub(crate) global_heap_lock: Lock,
     pub(crate) large_space_lock: Lock,
@@ -305,15 +308,22 @@ pub struct Immix<Decoder: 'static + StackValueDecoder = NoOpStackDecoder> {
     weak_refs: Vec<Weak<dyn Collectable, Self>>,
     constraints: Vec<Box<dyn MarkingConstraint>>,
     growth_multiplier: f64,
+    evacuation_enabled: bool,
+    evacuation_candidates: HashSet<usize>,
+    evacuation_cursor: *mut u8,
+    evacuation_limit: *mut u8,
 }
 
-impl<Decoder: StackValueDecoder> GetImmixSpace for Immix<Decoder> {
+/// Backwards-compatible name for [`StickyImmix`].
+pub type Immix<Decoder = NoOpStackDecoder> = StickyImmix<Decoder>;
+
+impl<Decoder: StackValueDecoder> GetImmixSpace for StickyImmix<Decoder> {
     fn immix_space(&self) -> &'static ImmixSpace {
         self.space
     }
 }
 
-pub struct ImmixOptions {
+pub struct StickyImmixOptions {
     /// Determines by how much heap grows after GC cycle. By default set to 1.75
     pub growth_multiplier: f64,
     /// Entire Immix heap area size. Set to 128MB by default, minimal supported value is 4MB (single chunk size)
@@ -326,11 +336,16 @@ pub struct ImmixOptions {
     pub max_heap_size: usize,
     /// Enables verbose loggig to stdout.
     pub verbose: u8,
+    /// Evacuate sparse Immix blocks during collection. Disabled by default.
+    pub evacuation: bool,
 }
 
-impl ImmixOptions {
+/// Backwards-compatible name for [`StickyImmixOptions`].
+pub type ImmixOptions = StickyImmixOptions;
+
+impl StickyImmixOptions {
     /// Set growth multiplier. Panics if x <= 1
-    pub fn with_growth_multiplier(mut self, x: f64) -> ImmixOptions {
+    pub fn with_growth_multiplier(mut self, x: f64) -> StickyImmixOptions {
         if x <= 1.0 {
             panic!("Growth multiplier is too small")
         }
@@ -338,7 +353,7 @@ impl ImmixOptions {
         self
     }
 
-    pub fn with_heap_size(mut self, x: usize) -> ImmixOptions {
+    pub fn with_heap_size(mut self, x: usize) -> StickyImmixOptions {
         if x < 4 * 1024 * 1024 {
             panic!("Heap size too small; Minimal heap size is 1 Immix chunk which is 4MB");
         }
@@ -346,26 +361,32 @@ impl ImmixOptions {
         self
     }
 
-    pub fn with_initial_size(mut self, x: usize) -> ImmixOptions {
+    pub fn with_initial_size(mut self, x: usize) -> StickyImmixOptions {
         self.initial_size = x;
         self
     }
 
-    pub fn with_min_heap_size(mut self, x: usize) -> ImmixOptions {
+    pub fn with_min_heap_size(mut self, x: usize) -> StickyImmixOptions {
         self.min_heap_size = x;
         self
     }
 
-    pub fn with_max_heap_size(mut self, x: usize) -> ImmixOptions {
+    pub fn with_max_heap_size(mut self, x: usize) -> StickyImmixOptions {
         self.max_heap_size = x;
         self
     }
-    pub fn with_verbose(mut self, x: u8) -> ImmixOptions {
+    pub fn with_verbose(mut self, x: u8) -> StickyImmixOptions {
         self.verbose = x;
         self
     }
+
+    /// Enable or disable opportunistic evacuation of sparse blocks.
+    pub fn with_evacuation(mut self, enabled: bool) -> StickyImmixOptions {
+        self.evacuation = enabled;
+        self
+    }
 }
-impl Default for ImmixOptions {
+impl Default for StickyImmixOptions {
     fn default() -> Self {
         Self {
             growth_multiplier: 1.75,
@@ -374,6 +395,7 @@ impl Default for ImmixOptions {
             max_heap_size: 128 * 1024 * 1024,
             initial_size: 32 * 1024 * 1024,
             verbose: 0,
+            evacuation: false,
         }
     }
 }
@@ -381,6 +403,12 @@ impl Default for ImmixOptions {
 pub fn instantiate_immix<Decoder: StackValueDecoder>(
     options: ImmixOptions,
 ) -> MutatorRef<Immix<Decoder>> {
+    instantiate_sticky_immix(options)
+}
+
+pub fn instantiate_sticky_immix<Decoder: StackValueDecoder>(
+    options: StickyImmixOptions,
+) -> MutatorRef<StickyImmix<Decoder>> {
     let space = Box::leak(Box::new(ImmixSpace::new(
         options.heap_size,
         options.initial_size,
@@ -389,7 +417,7 @@ pub fn instantiate_immix<Decoder: StackValueDecoder>(
         options.verbose > 0,
     )));
     space.init_bitmap();
-    let immix = Arc::new(UnsafeCell::new(Immix {
+    let immix = Arc::new(UnsafeCell::new(StickyImmix {
         space,
         large_space: LargeObjectSpace::new(),
         large_space_lock: Lock::INIT,
@@ -405,6 +433,10 @@ pub fn instantiate_immix<Decoder: StackValueDecoder>(
         weak_refs: vec![],
         constraints: vec![],
         growth_multiplier: options.growth_multiplier,
+        evacuation_enabled: options.evacuation,
+        evacuation_candidates: HashSet::new(),
+        evacuation_cursor: null_mut(),
+        evacuation_limit: null_mut(),
     }));
     let href = unsafe { &mut *immix.get() };
     let join_data = JoinData::new();
@@ -423,7 +455,69 @@ pub fn instantiate_immix<Decoder: StackValueDecoder>(
     mutator
 }
 
-impl<Decoder: StackValueDecoder> Immix<Decoder> {
+impl<Decoder: StackValueDecoder> StickyImmix<Decoder> {
+    fn prepare_evacuation(&mut self) {
+        self.evacuation_candidates.clear();
+        self.evacuation_cursor = null_mut();
+        self.evacuation_limit = null_mut();
+        if !self.evacuation_enabled {
+            return;
+        }
+
+        let mut to_space_bytes = self
+            .space
+            .free_blocks
+            .len()
+            .saturating_mul(IMMIX_BLOCK_SIZE - IMMIX_LINE_SIZE);
+        if to_space_bytes == 0 {
+            return;
+        }
+
+        for block in self.space.reusable_blocks.iter() {
+            let live_lines = match unsafe { (*block).state() } {
+                BlockState::Reusable { unavailable_lines } => unavailable_lines as usize,
+                _ => continue,
+            };
+            if live_lines > IMMIX_LINES_PER_BLOCK / 2 {
+                continue;
+            }
+
+            let live_bytes = live_lines * IMMIX_LINE_SIZE;
+            if live_bytes > to_space_bytes {
+                continue;
+            }
+
+            unsafe {
+                (*block).set_pinned_for_evacuation(false);
+            }
+            self.evacuation_candidates.insert(block as usize);
+            to_space_bytes -= live_bytes;
+        }
+    }
+
+    unsafe fn allocate_evacuation_copy(&mut self, size: usize) -> *mut HeapObjectHeader {
+        let size = align_usize(size, 8);
+        if size == 0 || size > IMMIX_BLOCK_SIZE - IMMIX_LINE_SIZE {
+            return null_mut();
+        }
+
+        if self.evacuation_cursor.is_null()
+            || self.evacuation_cursor.add(size) > self.evacuation_limit
+        {
+            let block = self.space.get_clean_block();
+            if block.is_null() {
+                return null_mut();
+            }
+            self.evacuation_cursor = (*block).start_address();
+            self.evacuation_limit = (*block).end_address();
+        }
+
+        let copy = self.evacuation_cursor;
+        self.evacuation_cursor = self.evacuation_cursor.add(size);
+        self.space.mark_bitmap.set(copy);
+        copy.cast()
+    }
+
     unsafe fn after_mark_constraints(&mut self) {
         let this = self as *mut Self;
         (*this).constraints.retain_mut(|constraint| {
@@ -494,12 +588,16 @@ impl<Decoder: StackValueDecoder> Immix<Decoder> {
                 continue;
             }
             let pointer = Decoder::decode(pointer);
-            if self.space.has_address(pointer) && pointer as usize % 8 == 0 {
+            if self.space.has_address(pointer) {
                 let block = ImmixBlock::from_object(pointer);
-                if (*block).state != BlockState::Unallocated {
-                    /*if let Some(mut header) =
-                    NonNull::new(self.space.mark_bitmap.find_header(pointer))*/
-                    if self.space.mark_bitmap.test(pointer) {
+                if self.evacuation_candidates.contains(&(block as usize))
+                    && pointer >= (*block).start()
+                    && pointer < (*block).end()
+                {
+                    (*block).set_pinned_for_evacuation(true);
+                }
+                if pointer as usize % 8 == 0 && self.space.mark_bitmap.test(pointer) {
+                    if (*block).state != BlockState::Unallocated {
                         let mut header = NonNull::new_unchecked(pointer.cast::<HeapObjectHeader>());
                         if self.verbose > 1 {
                             eprintln!(
@@ -507,7 +605,6 @@ impl<Decoder: StackValueDecoder> Immix<Decoder> {
                                 header, pointer, cursor
                             );
                         }
-                        // TODO: Pin object when we have defrag collection
                         self.mark_object(&mut header);
                         cursor = cursor.add(1);
                         continue;
@@ -526,7 +623,7 @@ impl<Decoder: StackValueDecoder> Immix<Decoder> {
     }
 }
 
-impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
+impl<Decoder: StackValueDecoder> GcBase for StickyImmix<Decoder> {
     type TLAB = ImmixAllocator;
     const SUPPORTS_TLAB: bool = false;
     type ReadBarrier = NoReadBarrier;
@@ -645,6 +742,7 @@ impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
                 self.global_heap_lock.lock();
                 self.large_space_lock.lock();
                 let mark_phase = std::time::Instant::now();
+                self.prepare_evacuation();
                 self.large_space.prepare_for_marking(false);
                 self.large_space.prepare_for_conservative_scan();
                 self.space.prepare(true);
@@ -675,9 +773,18 @@ impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
                 let mark_color = self.mark_color;
                 let sweep_phase = std::time::Instant::now();
                 self.weak_refs.retain_mut(|object| {
-                    let header = object.base();
+                    let mut header = object.base();
+                    if (*header).is_forwarded() {
+                        header = (*header).vtable() as *mut HeapObjectHeader;
+                        object.set_base(header);
+                    }
                     if (*header).get_color() == mark_color {
                         object.after_mark(|header| {
+                            let header = if (*header).is_forwarded() {
+                                (*header).vtable() as *mut HeapObjectHeader
+                            } else {
+                                header
+                            };
                             if (*header).get_color() == mark_color {
                                 header
                             } else {
@@ -693,6 +800,9 @@ impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
                 self.large_space.sweep();
                 self.large_space.prepare_for_allocation(false);
                 self.space.release(self.alloc_color);
+                self.evacuation_candidates.clear();
+                self.evacuation_cursor = null_mut();
+                self.evacuation_limit = null_mut();
 
                 let bytes_allocated =
                     self.space.num_bytes_allocated.load(Ordering::Relaxed) + self.large_space.bytes;
@@ -709,7 +819,7 @@ impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
                 if let Some(time) = time {
                     let elapsed = time.elapsed();
                     eprintln!(
-                        "[gc] GC({}) Pause Immix collection {}->{}({}) {:.4}ms (mark {:.4}ms, sweep {:.4}ms)",
+                        "[gc] GC({}) Pause Sticky Immix collection {}->{}({}) {:.4}ms (mark {:.4}ms, sweep {:.4}ms)",
                         self.total_gcs,
                         formatted_size(prev),
                         formatted_size(bytes_allocated),
@@ -811,14 +921,31 @@ impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
     }
 }
 
-impl<Decoder: StackValueDecoder> Visitor for Immix<Decoder> {
+impl<Decoder: StackValueDecoder> Visitor for StickyImmix<Decoder> {
     fn mark_object(&mut self, root: &mut NonNull<HeapObjectHeader>) {
-        let object = root.as_ptr();
         unsafe {
-            // todo: opportunistic evacuation
-
+            let mut object = root.as_ptr();
+            if (*object).is_forwarded() {
+                object = (*object).vtable() as *mut HeapObjectHeader;
+                *root = NonNull::new_unchecked(object);
+            }
             if !(*object).set_color(self.alloc_color, self.mark_color) {
                 if self.space.has_address(object.cast()) {
+                    let block = ImmixBlock::from_object(object.cast());
+                    if self.evacuation_candidates.contains(&(block as usize))
+                        && !(*block).is_pinned_for_evacuation()
+                    {
+                        let size = (*object).size();
+                        let copy = self.allocate_evacuation_copy(size);
+                        if !copy.is_null() {
+                            std::ptr::copy_nonoverlapping(object.cast::<u8>(), copy.cast(), size);
+                            (*copy).force_set_color(self.mark_color);
+                            (*object).set_forwarded(copy as usize);
+                            self.space.mark_bitmap.clear(object.cast());
+                            *root = NonNull::new_unchecked(copy);
+                            object = copy;
+                        }
+                    }
                     self.space.mark_lines(object);
                 } else {
                     (*PreciseAllocation::from_cell(object)).test_and_set_marked();
@@ -1017,7 +1144,7 @@ impl Defrag {
     }
 }*/
 
-impl<Decoder: StackValueDecoder> Drop for Immix<Decoder> {
+impl<Decoder: StackValueDecoder> Drop for StickyImmix<Decoder> {
     fn drop(&mut self) {
         unsafe {
             if self.verbose > 0 {
@@ -1025,5 +1152,122 @@ impl<Decoder: StackValueDecoder> Drop for Immix<Decoder> {
             }
             Box::from_raw(self.space as *const ImmixSpace as *mut ImmixSpace);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gc_base::NoOpStackDecoder;
+
+    fn collector() -> MutatorRef<StickyImmix<NoOpStackDecoder>> {
+        let heap_size = 4 * 1024 * 1024;
+        instantiate_sticky_immix(
+            StickyImmixOptions::default()
+                .with_heap_size(heap_size)
+                .with_initial_size(heap_size)
+                .with_min_heap_size(heap_size)
+                .with_max_heap_size(heap_size)
+                .with_evacuation(true),
+        )
+    }
+
+    fn make_evacuation_candidate<T: Collectable>(
+        heap: &mut StickyImmix<NoOpStackDecoder>,
+        object: &Gc<T, StickyImmix<NoOpStackDecoder>>,
+    ) -> *mut ImmixBlock {
+        let block = ImmixBlock::from_object(object.base.as_ptr().cast());
+        unsafe {
+            (*block).set_state(BlockState::Reusable {
+                unavailable_lines: 1,
+            });
+        }
+        heap.space.reusable_blocks.push(block);
+        heap.prepare_evacuation();
+        heap.space.prepare(true);
+        block
+    }
+
+    struct Link {
+        value: u64,
+        next: Option<Gc<Link, StickyImmix<NoOpStackDecoder>>>,
+    }
+
+    unsafe impl Trace for Link {
+        fn trace(&mut self, visitor: &mut dyn Visitor) {
+            self.next.trace(visitor);
+        }
+    }
+
+    unsafe impl crate::api::Finalize for Link {}
+    impl Collectable for Link {}
+
+    #[test]
+    fn evacuation_rewrites_traced_references_and_preserves_graph() {
+        let mut mutator = collector();
+        let child = mutator.allocate(
+            Link {
+                value: 42,
+                next: None,
+            },
+            AllocationSpace::New,
+        );
+        let child_address = child.base.as_ptr();
+        let mut root = mutator.allocate(
+            Link {
+                value: 7,
+                next: Some(child),
+            },
+            AllocationSpace::New,
+        );
+        let root_address = root.base.as_ptr();
+
+        let heap = mutator.heap_ref();
+        let source_block = make_evacuation_candidate(heap, &root);
+        heap.mark_object(&mut root.base);
+        while let Some(object) = heap.mark_stack.pop() {
+            unsafe {
+                (*object).get_dyn().trace(heap);
+            }
+        }
+
+        assert_ne!(root.base.as_ptr(), root_address);
+        assert_ne!(
+            ImmixBlock::from_object(root.base.as_ptr().cast()),
+            source_block
+        );
+        assert_eq!(
+            unsafe { (*root.base.as_ptr()).get_dyn().type_name() },
+            std::any::type_name::<Link>()
+        );
+        let moved_root = unsafe { &mut *((*root.base.as_ptr()).data() as *mut Link) };
+        assert_eq!(moved_root.value, 7);
+        let moved_child = moved_root.next.as_ref().unwrap();
+        assert_ne!(moved_child.base.as_ptr(), child_address);
+        assert_eq!(
+            unsafe { &*((*moved_child.base.as_ptr()).data() as *const Link) }.value,
+            42
+        );
+        assert!(unsafe { (*root_address).is_forwarded() });
+        assert!(unsafe { (*child_address).is_forwarded() });
+        assert!(!heap.space.mark_bitmap.test(root_address.cast()));
+        assert!(!heap.space.mark_bitmap.test(child_address.cast()));
+    }
+
+    #[test]
+    fn conservative_stack_observation_pins_candidate_block() {
+        let mut mutator = collector();
+        let object = mutator.allocate(42_u64, AllocationSpace::New);
+
+        let heap = mutator.heap_ref();
+        let block = make_evacuation_candidate(heap, &object);
+        let mut stack_slot = [object.base.as_ptr().cast::<u8>()];
+        unsafe {
+            heap.walk_stack(stack_slot.as_mut_ptr(), stack_slot.as_mut_ptr().add(1));
+        }
+
+        assert!(unsafe { (*block).is_pinned_for_evacuation() });
+        assert_eq!(object.base.as_ptr(), stack_slot[0].cast());
+        assert_eq!(unsafe { *(*object.base.as_ptr()).data().cast::<u64>() }, 42);
     }
 }
