@@ -21,6 +21,11 @@ flume = "0.12"
 rosalloc = { path = "../rosalloc" }
 im = "15.0"
 memx = "0.2.2"
+
+[[bench]]
+name = "immix"
+harness = false
+
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = [
     "memoryapi",

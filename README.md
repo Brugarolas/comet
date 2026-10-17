@@ -40,6 +40,19 @@ are promoted to old space, and once old space is full old space is collected in 
 
 The Immix is a mark-region garbage collector. It is based on mark-and-sweep but instead of sweeping on per object basis it sweeps lines which are 256 bytes in size. This allows us to always bump-allocate memory from "holes" (hole is a region with unmarked lines) and gives nice cache locality to allocations performed near each other. If you want to learn more you can read this [paper](https://users.cecs.anu.edu.au/~steveb/pubs/papers/immix-pldi-2008.pdf). 
 
+Immix uses per-mutator bump-allocation buffers for small and medium-sized
+objects. Run the allocation and collection microbenchmarks from the workspace
+root with:
+
+```sh
+cargo bench -p comet --bench immix
+```
+
+The benchmark reports TLAB allocation alongside Immix's inline allocation
+path, plus full-collection time with 4,096 live objects. Results are medians
+over five rounds; run on an otherwise idle machine and compare results on the
+same target and build configuration.
+
 
 # Which GC policy to choose? 
 

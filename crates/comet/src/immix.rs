@@ -163,13 +163,58 @@ where
     }
 
     fn refill(&mut self, _mutator: &crate::mutator::MutatorRef<H>, _alloc_size: usize) -> bool {
-        false
+        if _alloc_size > IMMIX_LINE_SIZE {
+            if !self.large_cursor.is_null()
+                && unsafe { self.large_cursor.add(_alloc_size) <= self.large_limit }
+            {
+                return true;
+            }
+
+            self.request_for_large = true;
+            let acquired = self.acquire_clean_block();
+            self.request_for_large = false;
+            acquired
+        } else {
+            if !self.cursor.is_null() && unsafe { self.cursor.add(_alloc_size) <= self.limit } {
+                return true;
+            }
+            self.acquire_recyclable_lines() || self.acquire_clean_block()
+        }
     }
     fn allocate<T: crate::api::Collectable + 'static>(
         &mut self,
-        _value: T,
+        value: T,
     ) -> Result<crate::api::Gc<T, H>, T> {
-        unreachable!()
+        let size = align_usize(value.allocation_size() + size_of::<HeapObjectHeader>(), 8);
+        let (cursor, limit) = if size > IMMIX_LINE_SIZE {
+            (&mut self.large_cursor, self.large_limit)
+        } else {
+            (&mut self.cursor, self.limit)
+        };
+
+        if cursor.is_null() || unsafe { cursor.add(size) > limit } {
+            return Err(value);
+        }
+
+        unsafe {
+            let memory = *cursor;
+            *cursor = cursor.add(size);
+            let header = memory.cast::<HeapObjectHeader>();
+            header.write(HeapObjectHeader {
+                type_id: small_type_id::<T>(),
+                padding: 0,
+                padding2: 0,
+                value: crate::api::VTable { raw: 0 },
+            });
+            (*header).set_metadata(vtable_of::<T>());
+            (*header).set_size(size);
+            ((*header).data() as *mut T).write(value);
+            (*self.bmap).set(header.cast());
+            Ok(Gc {
+                base: NonNull::new_unchecked(header),
+                marker: PhantomData,
+            })
+        }
     }
     fn reset(&mut self) {
         self.large_cursor = null_mut();
@@ -641,7 +686,7 @@ impl<Decoder: StackValueDecoder> StickyImmix<Decoder> {
 
 impl<Decoder: StackValueDecoder> GcBase for StickyImmix<Decoder> {
     type TLAB = ImmixAllocator;
-    const SUPPORTS_TLAB: bool = false;
+    const SUPPORTS_TLAB: bool = true;
     type ReadBarrier = NoReadBarrier;
     const LARGE_ALLOCATION_SIZE: usize = IMMIX_BLOCK_SIZE / 2;
 
@@ -1209,14 +1254,20 @@ mod tests {
         next: Option<Gc<Link, StickyImmix<NoOpStackDecoder>>>,
     }
 
+    struct MediumObject([u64; 64]);
+
     unsafe impl Trace for Link {
         fn trace(&mut self, visitor: &mut dyn Visitor) {
             self.next.trace(visitor);
         }
     }
 
+    unsafe impl Trace for MediumObject {}
+
     unsafe impl crate::api::Finalize for Link {}
+    unsafe impl crate::api::Finalize for MediumObject {}
     impl Collectable for Link {}
+    impl Collectable for MediumObject {}
 
     #[test]
     fn evacuation_rewrites_traced_references_and_preserves_graph() {
@@ -1335,5 +1386,38 @@ mod tests {
             assert!(line_table.test(line));
             line = unsafe { line.add(IMMIX_LINE_SIZE) };
         }
+    }
+
+    #[test]
+    fn tlab_refills_and_allocates_small_and_multiline_objects() {
+        let mut mutator = collector();
+        assert!(StickyImmix::<NoOpStackDecoder>::SUPPORTS_TLAB);
+        let small = mutator.allocate(7_u64, AllocationSpace::New);
+        let multiline = mutator.allocate(MediumObject([9_u64; 64]), AllocationSpace::New);
+
+        assert_eq!(unsafe { *(*small.base.as_ptr()).data().cast::<u64>() }, 7);
+        assert_eq!(
+            unsafe {
+                (*multiline.base.as_ptr())
+                    .data()
+                    .cast::<MediumObject>()
+                    .as_ref()
+                    .unwrap()
+                    .0[0]
+            },
+            9
+        );
+        assert!(!mutator.tlab.cursor.is_null());
+        assert!(!mutator.tlab.large_cursor.is_null());
+        assert!(mutator
+            .heap_ref()
+            .space
+            .mark_bitmap
+            .test(small.base.as_ptr().cast()));
+        assert!(mutator
+            .heap_ref()
+            .space
+            .mark_bitmap
+            .test(multiline.base.as_ptr().cast()));
     }
 }
