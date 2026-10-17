@@ -157,23 +157,46 @@ impl<const ALIGN: usize> SpaceBitmap<ALIGN> {
         &self,
         address_maybe_pointing_to_the_middle_of_object: *const u8,
     ) -> *mut HeapObjectHeader {
-        let address_maybe_pointing_to_the_middle_of_object =
-            address_maybe_pointing_to_the_middle_of_object as usize;
-        let object_offset =
-            address_maybe_pointing_to_the_middle_of_object.wrapping_sub(self.heap_begin);
-        let object_start_number = object_offset / ALIGN;
+        self.find_header_in_range(
+            address_maybe_pointing_to_the_middle_of_object,
+            self.heap_begin as _,
+        )
+    }
 
+    pub fn find_header_in_range(
+        &self,
+        address_maybe_pointing_to_the_middle_of_object: *const u8,
+        lower_bound: *const u8,
+    ) -> *mut HeapObjectHeader {
+        let address = address_maybe_pointing_to_the_middle_of_object as usize;
+        let lower_bound = (lower_bound as usize).max(self.heap_begin);
+        if address < lower_bound || address >= self.heap_limit || self.bitmap_begin.is_null() {
+            return null_mut();
+        }
+
+        let object_offset = address - self.heap_begin;
+        let object_start_number = object_offset / ALIGN;
         let mut cell_index = object_start_number / BITS_PER_INTPTR;
         let bit = object_start_number & (BITS_PER_INTPTR - 1);
+        let lower_offset = lower_bound - self.heap_begin;
+        let lower_start_number = lower_offset.div_ceil(ALIGN);
+        let lower_cell_index = lower_start_number / BITS_PER_INTPTR;
+        let lower_bit = lower_start_number & (BITS_PER_INTPTR - 1);
 
         let mut word = unsafe { self.bitmap_begin.add(cell_index).cast::<usize>().read() }
-            & ((1 << (bit + 1)) - 1);
+            & (usize::MAX >> (BITS_PER_INTPTR - 1 - bit));
 
-        while word == 0 && cell_index != 0 {
+        while word == 0 && cell_index > lower_cell_index {
             word = unsafe {
                 cell_index -= 1;
                 self.bitmap_begin.add(cell_index).cast::<usize>().read()
             };
+        }
+        if cell_index == lower_cell_index {
+            word &= usize::MAX << lower_bit;
+        }
+        if word == 0 {
+            return null_mut();
         }
         let leading_zeros = word.leading_zeros() as usize;
         let object_start_number =
@@ -1076,6 +1099,41 @@ macro_rules! gen_const_bitmap {
                     self.clear((self.heap_begin + end_offset) as _);
                 }
                 // TODO: try to madvise unused pages.
+            }
+
+            pub fn set_range(&self, begin: *const u8, end: *const u8) {
+                let begin_offset = begin as usize - self.heap_begin;
+                let end_offset = end as usize - self.heap_begin;
+                debug_assert!(begin_offset <= end_offset);
+                debug_assert!(
+                    end as usize <= self.heap_limit,
+                    "range end {:p} exceeds bitmap limit 0x{:x}; begin={:p}, heap_begin=0x{:x}",
+                    end,
+                    self.heap_limit,
+                    begin,
+                    self.heap_begin
+                );
+
+                let mut cursor = begin_offset / Self::ALIGN;
+                let end_bit = end_offset / Self::ALIGN;
+                while cursor < end_bit {
+                    let index = cursor / BITS_PER_INTPTR;
+                    let start_bit = cursor % BITS_PER_INTPTR;
+                    let word_end = end_bit.min((index + 1) * BITS_PER_INTPTR);
+                    let word_bit_end = word_end - index * BITS_PER_INTPTR;
+                    let low_mask = usize::MAX << start_bit;
+                    let high_mask = if word_bit_end == BITS_PER_INTPTR {
+                        usize::MAX
+                    } else {
+                        (1usize << word_bit_end) - 1
+                    };
+                    let entry = unsafe { &*self.bitmap_begin.add(index) };
+                    entry.store(
+                        entry.load(Ordering::Relaxed) | (low_mask & high_mask),
+                        Ordering::Relaxed,
+                    );
+                    cursor = word_end;
+                }
             }
 
             /// Visit marked bits in bitmap.

@@ -151,12 +151,7 @@ impl ImmixSpace {
             if !is_line_aligned(end) {
                 end_line = end_line.add(IMMIX_LINE_SIZE);
             }
-
-            let mut line = start_line;
-            while line < end_line {
-                (*chunk).line_mark_table().set(line);
-                line = line.add(IMMIX_LINE_SIZE);
-            }
+            (*chunk).line_mark_table().set_range(start_line, end_line);
         }
     }
     /// Prepare for marking phase by settings all blocks state to unamrked and possibly clearing

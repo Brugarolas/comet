@@ -30,7 +30,6 @@ use crate::{
 };
 use atomic::Ordering;
 use rosalloc::defs::PAGE_SIZE;
-use std::collections::HashSet;
 use std::{
     any::TypeId, cell::UnsafeCell, marker::PhantomData, mem::size_of, ptr::NonNull, sync::Arc,
 };
@@ -309,7 +308,7 @@ pub struct StickyImmix<Decoder: 'static + StackValueDecoder = NoOpStackDecoder> 
     constraints: Vec<Box<dyn MarkingConstraint>>,
     growth_multiplier: f64,
     evacuation_enabled: bool,
-    evacuation_candidates: HashSet<usize>,
+    evacuation_candidates: Vec<*mut ImmixBlock>,
     evacuation_cursor: *mut u8,
     evacuation_limit: *mut u8,
 }
@@ -434,7 +433,7 @@ pub fn instantiate_sticky_immix<Decoder: StackValueDecoder>(
         constraints: vec![],
         growth_multiplier: options.growth_multiplier,
         evacuation_enabled: options.evacuation,
-        evacuation_candidates: HashSet::new(),
+        evacuation_candidates: Vec::new(),
         evacuation_cursor: null_mut(),
         evacuation_limit: null_mut(),
     }));
@@ -457,7 +456,11 @@ pub fn instantiate_sticky_immix<Decoder: StackValueDecoder>(
 
 impl<Decoder: StackValueDecoder> StickyImmix<Decoder> {
     fn prepare_evacuation(&mut self) {
-        self.evacuation_candidates.clear();
+        for block in self.evacuation_candidates.drain(..) {
+            unsafe {
+                (*block).set_evacuation_candidate(false);
+            }
+        }
         self.evacuation_cursor = null_mut();
         self.evacuation_limit = null_mut();
         if !self.evacuation_enabled {
@@ -488,9 +491,10 @@ impl<Decoder: StackValueDecoder> StickyImmix<Decoder> {
             }
 
             unsafe {
+                (*block).set_evacuation_candidate(true);
                 (*block).set_pinned_for_evacuation(false);
             }
-            self.evacuation_candidates.insert(block as usize);
+            self.evacuation_candidates.push(block);
             to_space_bytes -= live_bytes;
         }
     }
@@ -590,24 +594,36 @@ impl<Decoder: StackValueDecoder> StickyImmix<Decoder> {
             let pointer = Decoder::decode(pointer);
             if self.space.has_address(pointer) {
                 let block = ImmixBlock::from_object(pointer);
-                if self.evacuation_candidates.contains(&(block as usize))
-                    && pointer >= (*block).start()
-                    && pointer < (*block).end()
-                {
+                if self.evacuation_enabled && (*block).is_evacuation_candidate() {
                     (*block).set_pinned_for_evacuation(true);
                 }
-                if pointer as usize % 8 == 0 && self.space.mark_bitmap.test(pointer) {
-                    if (*block).state != BlockState::Unallocated {
-                        let mut header = NonNull::new_unchecked(pointer.cast::<HeapObjectHeader>());
-                        if self.verbose > 1 {
-                            eprintln!(
-                                "[GC] Found Immix space object {:p} from {:p} at {:p}",
-                                header, pointer, cursor
-                            );
+                if (*block).state != BlockState::Unallocated {
+                    let header = if self.space.mark_bitmap.test(pointer) {
+                        pointer.cast::<HeapObjectHeader>()
+                    } else {
+                        self.space
+                            .mark_bitmap
+                            .find_header_in_range(pointer, (*block).start_address())
+                    };
+                    let header_address = header as usize;
+                    let pointer_address = pointer as usize;
+                    if !header.is_null()
+                        && ImmixBlock::from_object(header.cast()) == block
+                        && self.space.mark_bitmap.test(header.cast())
+                    {
+                        let object_end = header_address.saturating_add((*header).size());
+                        if pointer_address >= header_address && pointer_address < object_end {
+                            let mut header = NonNull::new_unchecked(header);
+                            if self.verbose > 1 {
+                                eprintln!(
+                                    "[GC] Found Immix object {:p} from conservative value {:p} at {:p}",
+                                    header, pointer, cursor
+                                );
+                            }
+                            self.mark_object(&mut header);
+                            cursor = cursor.add(1);
+                            continue;
                         }
-                        self.mark_object(&mut header);
-                        cursor = cursor.add(1);
-                        continue;
                     }
                 }
             }
@@ -800,7 +816,6 @@ impl<Decoder: StackValueDecoder> GcBase for StickyImmix<Decoder> {
                 self.large_space.sweep();
                 self.large_space.prepare_for_allocation(false);
                 self.space.release(self.alloc_color);
-                self.evacuation_candidates.clear();
                 self.evacuation_cursor = null_mut();
                 self.evacuation_limit = null_mut();
 
@@ -932,7 +947,8 @@ impl<Decoder: StackValueDecoder> Visitor for StickyImmix<Decoder> {
             if !(*object).set_color(self.alloc_color, self.mark_color) {
                 if self.space.has_address(object.cast()) {
                     let block = ImmixBlock::from_object(object.cast());
-                    if self.evacuation_candidates.contains(&(block as usize))
+                    if self.evacuation_enabled
+                        && (*block).is_evacuation_candidate()
                         && !(*block).is_pinned_for_evacuation()
                     {
                         let size = (*object).size();
@@ -1269,5 +1285,55 @@ mod tests {
         assert!(unsafe { (*block).is_pinned_for_evacuation() });
         assert_eq!(object.base.as_ptr(), stack_slot[0].cast());
         assert_eq!(unsafe { *(*object.base.as_ptr()).data().cast::<u64>() }, 42);
+    }
+
+    #[test]
+    fn conservative_interior_pointer_marks_and_pins_its_object() {
+        let mut mutator = collector();
+        let object = mutator.allocate(
+            Link {
+                value: 42,
+                next: None,
+            },
+            AllocationSpace::New,
+        );
+        let object_address = object.base.as_ptr();
+
+        let heap = mutator.heap_ref();
+        let block = make_evacuation_candidate(heap, &object);
+        let interior = unsafe {
+            (*object_address)
+                .data()
+                .add(std::mem::size_of::<u64>())
+                .cast_mut()
+        };
+        let mut stack_slot = [interior];
+        unsafe {
+            heap.walk_stack(stack_slot.as_mut_ptr(), stack_slot.as_mut_ptr().add(1));
+        }
+
+        assert!(unsafe { (*block).is_pinned_for_evacuation() });
+        assert_eq!(heap.mark_stack.as_slice(), &[object_address]);
+        assert_eq!(
+            unsafe { &*((*object_address).data() as *const Link) }.value,
+            42
+        );
+    }
+
+    #[test]
+    fn marking_large_object_sets_its_line_range() {
+        let mut mutator = collector();
+        let object = mutator.allocate(42_u64, AllocationSpace::New);
+        let block = ImmixBlock::from_object(object.base.as_ptr().cast());
+        let first_line = unsafe { (*block).start_address() };
+        let end_line = unsafe { first_line.add(64 * IMMIX_LINE_SIZE) };
+        let chunk = unsafe { (*block).chunk() };
+        let line_table = unsafe { (*chunk).line_mark_table() };
+        line_table.set_range(first_line, end_line);
+        let mut line = first_line;
+        while line < end_line {
+            assert!(line_table.test(line));
+            line = unsafe { line.add(IMMIX_LINE_SIZE) };
+        }
     }
 }

@@ -21,6 +21,7 @@ pub struct ImmixBlock {
     hole_count: u32,
     fragmented: bool,
     pinned_for_evacuation: bool,
+    evacuation_candidate: bool,
 }
 
 impl ImmixBlock {
@@ -36,6 +37,12 @@ impl ImmixBlock {
     pub fn is_pinned_for_evacuation(&self) -> bool {
         self.pinned_for_evacuation
     }
+    pub fn set_evacuation_candidate(&mut self, candidate: bool) {
+        self.evacuation_candidate = candidate;
+    }
+    pub fn is_evacuation_candidate(&self) -> bool {
+        self.evacuation_candidate
+    }
     pub fn chunk(&self) -> *mut Chunk {
         Chunk::align(self.start()).cast()
     }
@@ -43,6 +50,7 @@ impl ImmixBlock {
     pub fn deinit(&mut self) {
         self.state = BlockState::Unallocated;
         self.pinned_for_evacuation = false;
+        self.evacuation_candidate = false;
     }
     pub fn init(&mut self, copy: bool) {
         self.state = if copy {
@@ -53,6 +61,7 @@ impl ImmixBlock {
         self.hole_count = 0;
         self.fragmented = false;
         self.pinned_for_evacuation = false;
+        self.evacuation_candidate = false;
         self.next = null_mut();
     }
     pub fn next_atomic(&self) -> &AtomicPtr<ImmixBlock> {
