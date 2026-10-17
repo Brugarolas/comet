@@ -1,13 +1,13 @@
 use comet_extra::alloc::hash::HashMap;
 
 fn main() {
-    let mut heap = comet::immix::instantiate_immix(
-        128 * 1024 * 1024,
-        32 * 1024 * 1024,
-        4 * 1024 * 1024,
-        128 * 1024 * 1024,
-        true,
-    );
+    let options = comet::immix::ImmixOptions::default()
+        .with_heap_size(128 * 1024 * 1024)
+        .with_initial_size(32 * 1024 * 1024)
+        .with_min_heap_size(4 * 1024 * 1024)
+        .with_max_heap_size(128 * 1024 * 1024)
+        .with_verbose(1);
+    let mut heap = comet::immix::instantiate_immix::<comet::gc_base::NoOpStackDecoder>(options);
 
     let mut map = HashMap::new(&mut heap);
     map.insert(&mut heap, 0i32, 1i32);

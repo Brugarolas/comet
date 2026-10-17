@@ -25,7 +25,7 @@ unsafe impl<H: GcBase> Finalize for Node<H> {}
 impl<H: GcBase> Collectable for Node<H> {}
 
 fn main() {
-    let mut mutator = instantiate_immix(
+    let mut mutator = instantiate_immix::<comet::gc_base::NoOpStackDecoder>(
         ImmixOptions::default()
             .with_verbose(1)
             .with_heap_size(1024 * 1024 * 1024)

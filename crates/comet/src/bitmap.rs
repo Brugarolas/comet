@@ -699,6 +699,7 @@ impl ObjectStartBitmap {
     pub const CELL_MASK: usize = Self::BITS_PER_CELL - 1;
     pub fn new(heap_begin: *const u8, size: usize) -> Self {
         let mmap = Mmap::new(Self::allocation_size(size), 0);
+        mmap.commit(mmap.start(), mmap.size());
         unsafe {
             core::ptr::write_bytes(mmap.start(), 0, mmap.size());
         }

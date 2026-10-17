@@ -22,7 +22,6 @@ use crate::{
     safepoint::{GlobalSafepoint, SafepointScope},
     small_type_id,
     utils::{align_usize, formatted_size, stack_bounds::StackBounds},
-    ConstantId,
 };
 use crate::{
     bitmap::{round_up, ChunkMap},
@@ -621,7 +620,7 @@ impl<Decoder: StackValueDecoder> GcBase for Immix<Decoder> {
             }
             let object = memory.cast::<HeapObjectHeader>();
             (*object).set_metadata(vtable_of::<T>());
-            (*object).type_id = ConstantId::<T>::ID;
+            (*object).type_id = small_type_id::<T>();
             (*object).set_size(size);
             ((*object).data() as *mut T).write(value);
             let gced = Gc {

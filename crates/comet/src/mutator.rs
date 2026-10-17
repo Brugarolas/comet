@@ -4,10 +4,13 @@ use std::{
     mem::size_of,
     ops::{Deref, DerefMut},
     ptr::{null_mut, NonNull},
-    sync::{atomic::AtomicU32, Arc},
+    sync::{
+        atomic::{AtomicU32, AtomicU8},
+        Arc,
+    },
 };
 
-use atomic::{Atomic, Ordering};
+use atomic::Ordering;
 use parking_lot::{Condvar, Mutex};
 
 use crate::{
@@ -24,6 +27,27 @@ pub enum ThreadState {
     Unsafe = 0,
     Waiting = 1,
     Safe = 2,
+}
+
+pub(crate) struct AtomicThreadState(AtomicU8);
+
+impl AtomicThreadState {
+    fn new(state: ThreadState) -> Self {
+        Self(AtomicU8::new(state as u8))
+    }
+
+    pub(crate) fn load(&self, ordering: Ordering) -> ThreadState {
+        match self.0.load(ordering) {
+            0 => ThreadState::Unsafe,
+            1 => ThreadState::Waiting,
+            2 => ThreadState::Safe,
+            _ => unreachable!("invalid mutator thread state"),
+        }
+    }
+
+    pub(crate) fn store(&self, state: ThreadState, ordering: Ordering) {
+        self.0.store(state as u8, ordering);
+    }
 }
 
 impl ThreadState {
@@ -44,7 +68,7 @@ impl ThreadState {
 pub struct Mutator<H: GcBase + 'static> {
     pub(crate) tlab: H::TLAB,
 
-    pub(crate) state: Atomic<ThreadState>,
+    pub(crate) state: AtomicThreadState,
     pub(crate) stack_bounds: StackBounds,
     safepoint: *const GlobalSafepoint,
     safepoint_cond: *const AtomicU32,
@@ -118,7 +142,7 @@ impl<H: 'static + GcBase> Mutator<H> {
                 bound: null_mut(),
             },
             safepoint_cond: unsafe { &(&*safepoint).gc_running },
-            state: Atomic::new(ThreadState::Unsafe),
+            state: AtomicThreadState::new(ThreadState::Unsafe),
             tlab: H::TLAB::create(heap),
             last_sp: Cell::new(null_mut()),
             join_data,

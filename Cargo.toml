@@ -1,5 +1,6 @@
 
 [workspace]
 members = ["crates/rosalloc", "crates/comet", "crates/comet-extra"]
+resolver = "2"
 
 default-members = ["crates/rosalloc", "crates/comet", "crates/comet-extra"]

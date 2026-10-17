@@ -1,7 +1,7 @@
 use comet::{gc_base::AllocationSpace, immix::*, letroot};
 
 fn main() {
-    let mut mutator = instantiate_immix(Default::default());
+    let mut mutator = instantiate_immix::<comet::gc_base::NoOpStackDecoder>(Default::default());
     let stack = mutator.shadow_stack();
     let my_obj = mutator.allocate(42i32, AllocationSpace::New); // note that this object is unprotected and it will be recycled during GC cycle
     letroot!(

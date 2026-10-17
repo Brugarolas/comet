@@ -99,7 +99,7 @@ impl<H: GcBase<TLAB = Self>> TLAB<H> for SimpleTLAB<H> {
 /// ## Example
 /// **NOTE**: Pseudocode
 ///
-/// ```rust
+/// ```text
 /// fn emit_alloc_object<H: GcBase<TLAB=SimpleTLAB<H>>(&mut self,size: usize,mutator: &MutatorRef<H>) {
 ///     let helpers = mutator.inline_helpers();
 ///     let cursor_offset = helpers.tlab_cursor_offset(mutator);

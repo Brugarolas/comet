@@ -21,15 +21,7 @@
 //! - [Semispace](semispace)
 //! - [Shenandoah](shenandoah) (NOTE: Very W.I.P & TBD)
 
-#![feature(
-    new_uninit,
-    const_type_id,
-    vec_retain_mut,
-    thread_local,
-    associated_type_defaults,
-    type_name_of_val,
-    ptr_metadata
-)]
+#![feature(associated_type_defaults, ptr_metadata, thread_local)]
 #[macro_use]
 pub mod shadow_stack;
 #[macro_use]
@@ -57,7 +49,7 @@ pub mod space;
 pub mod sticky_immix;
 pub mod tlab;
 pub mod waitlists;
-use std::{any::TypeId, marker::PhantomData};
+use std::any::TypeId;
 
 pub use mopa;
 
@@ -106,7 +98,7 @@ const fn fnv1a_hash_16_xor(bytes: &[u8], limit: Option<usize>) -> u16 {
 */
 
 #[inline(always)]
-pub(crate) const fn small_type_id<T: 'static>() -> u32 {
+pub(crate) fn small_type_id<T: 'static>() -> u32 {
     unsafe {
         let bytes: [u8; std::mem::size_of::<TypeId>()] = std::mem::transmute(TypeId::of::<T>());
         fnv1a_hash_32(&bytes, None)
@@ -114,7 +106,7 @@ pub(crate) const fn small_type_id<T: 'static>() -> u32 {
 }
 
 #[inline(always)]
-pub(crate) const fn make_small_type_id(id: TypeId) -> u32 {
+pub(crate) fn make_small_type_id(id: TypeId) -> u32 {
     unsafe {
         let bytes: [u8; std::mem::size_of::<TypeId>()] = std::mem::transmute(id);
         fnv1a_hash_32(&bytes, None)
@@ -135,10 +127,4 @@ macro_rules! gc_offsetof {
             faddr - 0x4000
         }
     };
-}
-
-pub struct ConstantId<T>(PhantomData<T>);
-
-impl<T: 'static> ConstantId<T> {
-    pub const ID: u32 = small_type_id::<T>();
 }

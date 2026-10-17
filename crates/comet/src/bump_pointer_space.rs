@@ -21,6 +21,7 @@ impl BumpPointerSpace {
     }
     pub fn new(size: usize) -> Self {
         let mmap = Mmap::new(size, 8);
+        mmap.commit(mmap.start(), mmap.size());
         let start = mmap.start();
         let end = mmap.end();
         let cursor = AtomicPtr::new(start);

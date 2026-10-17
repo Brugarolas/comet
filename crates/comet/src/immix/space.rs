@@ -29,6 +29,7 @@ impl ImmixSpace {
         let size = round_up(size as _, CHUNK_SIZE as _);
         let mmap = Mmap::new(size as _, CHUNK_SIZE);
         let aligned_size = mmap.end() as usize - mmap.aligned_start() as usize;
+        mmap.commit(mmap.aligned_start(), aligned_size);
 
         let n_chunks = aligned_size / CHUNK_SIZE;
         let free_list = BlockList::new();

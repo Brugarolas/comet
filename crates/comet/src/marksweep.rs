@@ -374,8 +374,9 @@ impl GcBase for MarkSweep {
                 let freed = freed + los_freed + revoke_freed;
 
                 self.num_bytes_allocated.fetch_sub(freed, Ordering::Relaxed);
-                (*self.rosalloc).swap_bitmaps();
-                (*self.rosalloc).mark_bitmap.clear_all();
+                let rosalloc_space = &mut *self.rosalloc;
+                rosalloc_space.swap_bitmaps();
+                rosalloc_space.mark_bitmap.clear_all();
 
                 (*(*self.rosalloc).rosalloc()).trim();
 

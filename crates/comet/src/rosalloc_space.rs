@@ -121,6 +121,7 @@ impl RosAllocSpace {
         can_move_objects: bool,
     ) -> *mut Self {
         unsafe {
+            mem_map.commit(mem_map.start(), starting_size);
             let rosalloc = Self::create_rosalloc(
                 mem_map.start(),
                 starting_size,

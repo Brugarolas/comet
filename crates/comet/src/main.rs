@@ -13,7 +13,7 @@ unsafe impl Finalize for Foo {}
 impl Collectable for Foo {}
 fn main() {
     let opts = ImmixOptions::default().with_verbose(2);
-    let mut immix = instantiate_immix(opts);
+    let mut immix = instantiate_immix::<comet::gc_base::NoOpStackDecoder>(opts);
 
     let x = &immix
         .allocate(Foo { x: 0, z: 0 }, comet::gc_base::AllocationSpace::New)

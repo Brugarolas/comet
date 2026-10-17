@@ -168,7 +168,7 @@ dependencies = [
  "hashbrown 0.17.1",
  "im",
  "libc",
- "memx 0.2.2",
+ "memx",
  "mopa",
  "parking_lot",
  "rand",
@@ -473,15 +473,6 @@ dependencies = [
 
 [[package]]
 name = "memx"
-version = "0.1.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "902bfec851b10e18f2d749bb2a6ea639fa725383575a2737ffd2a8ac4f2ae01a"
-dependencies = [
- "rustc_version",
-]
-
-[[package]]
-name = "memx"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b34799f4a1d8693a53c36c100211735052ea2193eabdd03c3aa304319a39978c"
@@ -651,9 +642,7 @@ version = "0.1.0"
 dependencies = [
  "cfg-if",
  "indexmap 1.7.0",
- "libc",
  "log",
- "memx 0.1.18",
  "parking_lot",
  "thread_local",
  "winapi",
@@ -664,15 +653,6 @@ name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b74b56ffa8bb2830709a538c2cbcae9aa062db0d2a42563bfb09bdaae44020eb"
-
-[[package]]
-name = "rustc_version"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfa0f585226d2e68097d4f95d113b15b83a82e819ab25717ec0590d9584ef366"
-dependencies = [
- "semver",
-]
 
 [[package]]
 name = "rustversion"
@@ -691,12 +671,6 @@ name = "scopeguard"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d29ab0c6d3fc0ee92fe66e2d99f700eab17a8d57d1c1d3b748380fb20baa78cd"
-
-[[package]]
-name = "semver"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "568a8e6258aa33c13358f81fd834adb854c6f7c9468520910a9b1e8fac068012"
 
 [[package]]
 name = "serde"
