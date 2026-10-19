@@ -1,3 +1,5 @@
+#![feature(associated_type_defaults, ptr_metadata, thread_local)]
+
 //! # Comet
 //!
 //! Comet is general purpose GC library for Rust. Main usage target for this library is for VM implementated in Rust programming language but nothing stops you from using it
@@ -21,7 +23,6 @@
 //! - [Semispace](semispace)
 //! - [Shenandoah](shenandoah) (NOTE: Very W.I.P & TBD)
 
-#![feature(associated_type_defaults, ptr_metadata, thread_local)]
 #[macro_use]
 pub mod shadow_stack;
 #[macro_use]

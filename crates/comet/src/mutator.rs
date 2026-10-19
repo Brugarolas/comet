@@ -230,6 +230,32 @@ impl<H: 'static + GcBase> Mutator<H> {
 }
 
 impl<H: GcBase> MutatorRef<H> {
+    /// Allocate an uninitialized GC object with the tracing metadata for `T`.
+    ///
+    /// The returned object must be initialized and converted with
+    /// `Gc::assume_init` before any collection can inspect it.
+    ///
+    /// # Safety
+    /// The caller must initialize the allocation as a valid `T` before it can
+    /// be traced or finalized.
+    pub unsafe fn allocate_raw<T: Collectable + Sized + 'static>(
+        &mut self,
+        size: usize,
+    ) -> Option<Gc<std::mem::MaybeUninit<T>, H>> {
+        use std::any::TypeId;
+
+        let vtable = crate::api::vtable_of::<std::mem::MaybeUninit<T>>();
+        let vtable = std::mem::transmute(vtable);
+        let heap = unsafe { &mut *self.heap.get() };
+        let raw = heap.allocate_raw(
+            self,
+            size,
+            TypeId::of::<std::mem::MaybeUninit<T>>(),
+            vtable,
+        );
+        NonNull::new(raw).map(|raw| Gc::from_raw(raw))
+    }
+
     pub fn inspect(&self, f: impl FnMut(Gc<dyn Collectable, H>) -> bool) -> bool {
         loop {
             match SafepointScope::new(self.clone()) {

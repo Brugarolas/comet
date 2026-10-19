@@ -271,6 +271,8 @@ pub struct Gc<T: Collectable + ?Sized, H: GcBase> {
 }
 impl<T: Collectable + Sized, H: GcBase> Gc<MaybeUninit<T>, H> {
     pub unsafe fn assume_init(self) -> Gc<T, H> {
+        (*self.base.as_ptr()).set_metadata(vtable_of::<T>());
+        (*self.base.as_ptr()).type_id = small_type_id::<T>();
         Gc {
             base: self.base,
             marker: Default::default(),
@@ -278,6 +280,24 @@ impl<T: Collectable + Sized, H: GcBase> Gc<MaybeUninit<T>, H> {
     }
 }
 impl<T: Collectable + ?Sized, H: GcBase> Gc<T, H> {
+    /// Construct a GC handle for an already allocated object.
+    ///
+    /// # Safety
+    /// `base` must point to a live Comet allocation whose dynamic type implements
+    /// `Collectable` and is compatible with `T`.
+    pub unsafe fn from_raw(base: NonNull<HeapObjectHeader>) -> Self {
+        Self {
+            base,
+            marker: PhantomData,
+        }
+    }
+
+    /// Return the object header address for this GC handle.
+    #[inline]
+    pub fn as_raw(self) -> NonNull<HeapObjectHeader> {
+        self.base
+    }
+
     pub fn get_dyn(&self) -> &dyn Collectable {
         unsafe { (*self.base.as_ptr()).get_dyn() }
     }
@@ -429,9 +449,7 @@ impl<T: Collectable, H: GcBase> DerefMut for Gc<T, H> {
 }
 
 unsafe impl<T: Trace> Trace for MaybeUninit<T> {
-    fn trace(&mut self, _vis: &mut dyn Visitor) {
-        unreachable!()
-    }
+    fn trace(&mut self, _vis: &mut dyn Visitor) {}
 }
 
 unsafe impl<T> Finalize for MaybeUninit<T> {}
